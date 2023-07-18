@@ -165,10 +165,6 @@ jobs:
           path: aya
           submodules: recursive
 
-      - name: Install
-        if: matrix.rust == 'nightly'
-        run: cargo install --path . --no-default-features --features llvm-sys/force-dynamic
-
       # TODO: Remove this and run the integration tests on the local machine when they pass on 5.15.
       - name: Download debian kernels
         if: matrix.rust == 'nightly' && runner.arch == 'ARM64'
@@ -206,4 +202,6 @@ jobs:
         run: |
           set -euxo pipefail
           sudo apt install -y locate qemu-system-{arm,x86}
-          find test/.tmp -name 'vmlinuz-*' | RUSTFLAGS=-Cdebuginfo=line-directives-only xargs -t cargo xtask integration-test vm
+          find test/.tmp -name 'vmlinuz-*' | RUSTFLAGS=-Cdebuginfo=line-directives-only xargs -t cargo \
+            --config 'patch.'\''https://github.com/aya-rs/bpf-linker.git'\''.bpf-linker.path="../"'` \
+          xtask integration-test vm
