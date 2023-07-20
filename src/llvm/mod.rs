@@ -11,16 +11,25 @@ use std::{
 };
 
 pub use di::DISanitizer;
-use iter::{IterModuleFunctions, IterModuleGlobalAliases, IterModuleGlobals};
+use iter::{
+    IterInstructions as _, IterBasicBlocks as _, IterModuleFunctions as _,
+    IterModuleGlobalAliases as _, IterModuleGlobals as _,
+};
 use libc::c_char as libc_char;
 use llvm_sys::{
     bit_reader::LLVMParseBitcodeInContext2,
     core::{
-        LLVMCreateMemoryBufferWithMemoryRange, LLVMDisposeMemoryBuffer, LLVMDisposeMessage,
-        LLVMGetDiagInfoDescription, LLVMGetDiagInfoSeverity, LLVMGetEnumAttributeKindForName,
-        LLVMGetMDString, LLVMGetModuleInlineAsm, LLVMGetTarget, LLVMGetValueName2,
-        LLVMModuleCreateWithNameInContext, LLVMPrintModuleToFile, LLVMRemoveEnumAttributeAtIndex,
-        LLVMSetLinkage, LLVMSetModuleInlineAsm2, LLVMSetVisibility,
+        LLVMBuildCall2, LLVMBuildIntCast2, LLVMCountParamTypes, LLVMCreateBuilderInContext,
+        LLVMCreateMemoryBufferWithMemoryRange, LLVMDisposeBuilder, LLVMDisposeMemoryBuffer,
+        LLVMDisposeMessage, LLVMGetDiagInfoDescription, LLVMGetDiagInfoSeverity,
+        LLVMGetMDString,
+        LLVMGetEnumAttributeKindForName, LLVMGetModuleContext, LLVMGetModuleInlineAsm,
+        LLVMGetNamedFunction, LLVMGetNumOperands, LLVMGetOperand, LLVMGetParamTypes, LLVMGetTarget,
+        LLVMGetValueName2, LLVMGlobalGetValueType, LLVMInstructionEraseFromParent,
+        LLVMIsAMemCpyInst, LLVMIsAMemIntrinsic, LLVMIsAMemMoveInst, LLVMIsAMemSetInst,
+        LLVMModuleCreateWithNameInContext, LLVMPositionBuilderBefore, LLVMPrintModuleToFile,
+        LLVMRemoveEnumAttributeAtIndex, LLVMReplaceAllUsesWith, LLVMSetLinkage,
+        LLVMSetModuleInlineAsm2, LLVMSetVisibility, LLVMTypeOf,
     },
     debuginfo::LLVMStripModuleDebugInfo,
     error::{
@@ -250,6 +259,98 @@ pub unsafe fn optimize(
         let error_string = CStr::from_ptr(error_message).to_str().unwrap().to_owned();
         LLVMDisposeErrorMessage(error_message);
         return Err(error_string);
+    }
+
+
+    // Collect up all the memory intrinsics. We're going to replace these with
+    // calls to the equivalent functions, but we can't remove the instructions
+    // until we're done iterating over them.
+    let mut mem_intrinsic_instructions = Vec::new();
+    for function in module.functions_iter() {
+        for basic_block in function.basic_blocks_iter() {
+            for instruction in basic_block.instructions_iter() {
+                let instruction = LLVMIsAMemIntrinsic(instruction);
+                if instruction.is_null() {
+                    continue;
+                }
+                mem_intrinsic_instructions.push(instruction);
+            }
+        }
+    }
+
+    // Replace the memory intrinsics with calls to the equivalent functions. This works around a
+    // check added in https://github.com/llvm/llvm-project/commit/e4975487 that causes LLVM to emit
+    // fatal errors on calls to external functions. In particular, we often end up with memset
+    // intrinsics that LLVM lowers to calls - which are fine because we provide implementations but
+    // - which trip this check. We rewrite these intrinsics as internal calls and everyone is happy.
+    //
+    // TODO: remove this when https://reviews.llvm.org/D155894 is resolved and the check is removed.
+    {
+        // LLVMGet* functions do not pass ownership to the caller.
+        let context = LLVMGetModuleContext(module);
+
+        let builder = LLVMCreateBuilderInContext(context);
+        for instruction in mem_intrinsic_instructions.iter().copied() {
+            let instruction_num_operands = LLVMGetNumOperands(instruction);
+            let instruction_num_operands: u32 = instruction_num_operands.try_into().unwrap();
+            let mut instruction_operands: Vec<_> = (0..instruction_num_operands)
+                .map(|i| LLVMGetOperand(instruction, i))
+                .collect();
+
+            let instruction_name = if !LLVMIsAMemCpyInst(instruction).is_null() {
+                "memcpy"
+            } else if !LLVMIsAMemMoveInst(instruction).is_null() {
+                "memmove"
+            } else if !LLVMIsAMemSetInst(instruction).is_null() {
+                "memset"
+            } else {
+                panic!("unknown mem intrinsic");
+            };
+            let function = {
+                let instruction_name = CString::new(instruction_name).unwrap();
+                LLVMGetNamedFunction(module, instruction_name.as_ptr())
+            };
+            // The user neglected to defined a required intrinsic. Perhaps we
+            // should return an error instead of panicking.
+            assert!(
+                !function.is_null(),
+                "missing mem intrinsic function {instruction_name}"
+            );
+            let function_type = LLVMGlobalGetValueType(function);
+            let param_count = LLVMCountParamTypes(function_type);
+
+            // Call instructions can't have a name; attempting to set one crashes LLVM.
+            let empty_string = [0];
+
+            LLVMPositionBuilderBefore(builder, instruction);
+            let mut types = vec![ptr::null_mut(); param_count.try_into().unwrap()];
+            LLVMGetParamTypes(function_type, types.as_mut_ptr());
+            for (operand, param_type) in instruction_operands.iter_mut().zip(types.into_iter()) {
+                let operand_type = LLVMTypeOf(*operand);
+                if operand_type == param_type {
+                    continue;
+                }
+                *operand = LLVMBuildIntCast2(
+                    builder,
+                    *operand,
+                    param_type,
+                    0, /* IsSigned */
+                    empty_string.as_ptr(),
+                );
+            }
+
+            let call = LLVMBuildCall2(
+                builder,
+                function_type,
+                function,
+                instruction_operands.as_mut_ptr(),
+                param_count,
+                empty_string.as_ptr(),
+            );
+            LLVMReplaceAllUsesWith(instruction, call);
+            LLVMInstructionEraseFromParent(instruction);
+        }
+        LLVMDisposeBuilder(builder);
     }
 
     Ok(())
