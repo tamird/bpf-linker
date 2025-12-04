@@ -15,6 +15,7 @@ use llvm_sys::{
     error_handling::{LLVMEnablePrettyStackTrace, LLVMInstallFatalErrorHandler},
     target_machine::LLVMCodeGenFileType,
 };
+use memmap2::{Mmap, MmapOptions};
 use thiserror::Error;
 use tracing::{debug, error, info, warn};
 
@@ -468,28 +469,34 @@ where
 
     let mut buf = Vec::new();
     for input in inputs {
+        let data: Mmap;
         let (path, input) = match input {
             LinkerInput::File { path } => {
-                let data = fs::read(path).map_err(|e| LinkerError::IoError(path.to_owned(), e))?;
-                (path.to_owned(), Cow::Owned(data))
+                let file =
+                    fs::File::open(path).map_err(|e| LinkerError::IoError(path.to_owned(), e))?;
+                data = unsafe {
+                    MmapOptions::new()
+                        .map(&file)
+                        .map_err(|e| LinkerError::IoError(path.to_owned(), e))?
+                };
+                (path.to_owned(), data.as_ref())
             }
-            LinkerInput::Buffer { name, bytes } => (
-                PathBuf::from(format!("in_memory::{}", name)),
-                Cow::Borrowed(bytes),
-            ),
+            LinkerInput::Buffer { name, bytes } => {
+                (PathBuf::from(format!("in_memory::{}", name)), bytes)
+            }
         };
 
         // determine whether the input is bitcode, ELF with embedded bitcode, an archive file
         // or an invalid file
-        let in_type = InputKind::detect(input.as_ref())
-            .ok_or_else(|| LinkerError::InvalidInputType(path.clone()))?;
+        let in_type =
+            InputKind::detect(input).ok_or_else(|| LinkerError::InvalidInputType(path.clone()))?;
 
         match in_type {
             InputKind::Archive => {
                 info!("linking archive {}", path.display());
 
                 // Extract the archive and call link_reader() for each item.
-                let mut archive = Archive::new(input.as_ref());
+                let mut archive = Archive::new(input);
                 while let Some(item) = archive.next_entry() {
                     let mut item = item.map_err(|e| LinkerError::IoError(path.clone(), e))?;
                     let name = PathBuf::from(OsStr::from_bytes(item.header().identifier()));
@@ -545,11 +552,10 @@ where
             InputKind::Linker(kind) => {
                 let terminated_input: CString;
                 let prepared_input = match kind {
-                    LinkerInputKind::Bitcode => PreparedLinkerInput::Bitcode(input.as_ref()),
-                    LinkerInputKind::Elf => PreparedLinkerInput::Elf(input.as_ref()),
-                    LinkerInputKind::MachO => PreparedLinkerInput::MachO(input.as_ref()),
+                    LinkerInputKind::Bitcode => PreparedLinkerInput::Bitcode(input),
+                    LinkerInputKind::Elf => PreparedLinkerInput::Elf(input),
+                    LinkerInputKind::MachO => PreparedLinkerInput::MachO(input),
                     LinkerInputKind::Ir => {
-                        let input: Vec<_> = input.into_owned();
                         terminated_input = CString::new(input).map_err(|err| {
                             LinkerError::IRParseError(path.to_owned(), err.to_string())
                         })?;
