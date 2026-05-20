@@ -1,0 +1,6 @@
+---
+source: btf-macros/src/tests.rs
+expression: "expand_profile(r#\"\n            pub struct Profile {\n                detect {\n                    task_struct.__state,\n                }\n            }\n            \"#,).into_bytes()"
+extension: rs
+snapshot_kind: binary
+---

@@ -13,6 +13,41 @@ fn rustc_cmd() -> Command {
     Command::new(env::var_os("RUSTC").unwrap_or_else(|| OsString::from("rustc")))
 }
 
+fn build_btf(target: &str, sysroot: &Path) -> PathBuf {
+    let out_dir = PathBuf::from("target")
+        .join("compiletest")
+        .join(target)
+        .join("btf");
+    fs::create_dir_all(&out_dir).expect("failed to create btf compiletest output directory");
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let output = rustc_cmd()
+        .arg("--crate-name")
+        .arg("btf")
+        .arg("--crate-type")
+        .arg("rlib")
+        .arg("--edition")
+        .arg("2024")
+        .arg("--target")
+        .arg(target)
+        .arg("--sysroot")
+        .arg(sysroot)
+        .arg("--out-dir")
+        .arg(&out_dir)
+        .arg(manifest_dir.join("btf/src/lib.rs"))
+        .output()
+        .expect("failed to build btf for compiletest");
+    if !output.status.success() {
+        panic!(
+            "btf compiletest build failed with code {:?}\nstdout: {}\nstderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    out_dir.join("libbtf.rlib")
+}
+
 fn find_binary(binary_re_str: &str) -> PathBuf {
     let binary_re = regex::Regex::new(binary_re_str).unwrap();
     let mut binary = which::which_re(binary_re).expect(binary_re_str);
@@ -25,10 +60,59 @@ fn run_mode<F>(target: &str, mode: &str, sysroot: &Path, cfg: Option<F>)
 where
     F: Fn(&mut compiletest_rs::Config),
 {
+    let deps_dir = env::current_exe()
+        .expect("could not determine test binary path")
+        .parent()
+        .expect("test binary path has no parent")
+        .to_path_buf();
+    let dylib_suffix = format!(".{}", env::consts::DLL_EXTENSION);
+    // A shared target directory can legitimately contain proc-macro dylibs
+    // produced by several toolchains or previous source revisions. Ask Cargo
+    // for the artifact selected by this invocation rather than guessing from
+    // all files in `deps_dir`.
+    let cargo = env::var_os("CARGO").unwrap_or_else(|| OsString::from("cargo"));
+    let output = Command::new(&cargo)
+        .current_dir(env!("CARGO_MANIFEST_DIR"))
+        .args(["build", "--package", "btf-macros", "--message-format=json"])
+        .output()
+        .unwrap_or_else(|err| panic!("failed to run {cargo:?}: {err}"));
+    if !output.status.success() {
+        panic!(
+            "{cargo:?} failed with code {:?}\nstdout: {}\nstderr: {}",
+            output.status.code(),
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let mut proc_macro_paths = Vec::new();
+    for line in output.stdout.split(|byte| *byte == b'\n') {
+        let Ok(message) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        if message["reason"] != "compiler-artifact" || message["target"]["name"] != "btf_macros" {
+            continue;
+        }
+        let Some(filenames) = message["filenames"].as_array() else {
+            continue;
+        };
+        proc_macro_paths.extend(filenames.iter().filter_map(|filename| {
+            let filename = filename.as_str()?;
+            filename
+                .ends_with(&dylib_suffix)
+                .then(|| PathBuf::from(filename))
+        }));
+    }
+    let [proc_macro] = proc_macro_paths.as_slice() else {
+        panic!("Cargo did not report one btf-macros proc-macro dylib: {proc_macro_paths:?}");
+    };
+    let btf = build_btf(target, sysroot);
     let target_rustcflags = format!(
-        "-C linker={} --sysroot {}",
+        "-C linker={} --sysroot {} -L dependency={} --extern btf={} --extern btf_macros={}",
         env!("CARGO_BIN_EXE_bpf-linker"),
-        sysroot.to_str().unwrap()
+        sysroot.to_str().unwrap(),
+        deps_dir.display(),
+        btf.display(),
+        proc_macro.display(),
     );
 
     let llvm_filecheck = Some(find_binary(r"^FileCheck(-\d+)?$"));

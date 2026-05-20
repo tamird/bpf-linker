@@ -55,6 +55,10 @@ pub enum LinkerError {
     #[error("LLVMRunPasses failed: {0}")]
     OptimizeError(String),
 
+    /// Lowering macro-generated CO-RE field-info queries failed.
+    #[error("failed to lower CO-RE field-info queries: {0}")]
+    FieldRelocError(String),
+
     /// Generating the BPF code failed.
     #[error("LLVMTargetMachineEmitToFile failed: {0}")]
     EmitCodeError(String),
@@ -711,6 +715,12 @@ where
     if *btf {
         // if we want to emit BTF, we need to sanitize the debug information
         llvm::DISanitizer::new(context, module).run(&export_symbols);
+        // `#[btf]` getters leave field-info marker calls in the Rust IR. Lower
+        // them after DI sanitization so preserve-access metadata names the
+        // same local BTF types that the backend will emit.
+        llvm::FieldRelocPass::new(context, module)
+            .run()
+            .map_err(|err| LinkerError::FieldRelocError(err.to_string()))?;
     } else {
         // if we don't need BTF emission, we can strip DI
         let ok = module.strip_debug_info();

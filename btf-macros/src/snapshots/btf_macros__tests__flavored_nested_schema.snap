@@ -1,0 +1,6 @@
+---
+source: btf-macros/src/tests.rs
+expression: "expand(r#\"\n            pub struct task_struct {\n                pid: i32,\n                se: sched_entity,\n            }\n            \"#,\nSome(\"modern\"),).into_bytes()"
+extension: rs
+snapshot_kind: binary
+---

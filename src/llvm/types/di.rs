@@ -8,7 +8,7 @@ use llvm_sys::{
         LLVMDITypeGetFlags, LLVMDITypeGetLine, LLVMDITypeGetName, LLVMDITypeGetOffsetInBits,
         LLVMGetDINodeTag,
     },
-    prelude::{LLVMMetadataRef, LLVMValueRef},
+    prelude::{LLVMContextRef, LLVMMetadataRef, LLVMValueRef},
 };
 
 use crate::llvm::{
@@ -146,6 +146,17 @@ impl<'ctx> From<DIDerivedType<'ctx>> for DIType<'ctx> {
     }
 }
 
+/// Represents the operands for a [`DIDerivedType`]. The enum values correspond
+/// to the operand indices within metadata nodes.
+#[repr(u32)]
+enum DIDerivedTypeOperand {
+    /// [`DIType`] representing the base type of the derived type.
+    #[cfg(feature = "llvm-20")]
+    BaseType = 3,
+    #[cfg(not(feature = "llvm-20"))]
+    BaseType = 5,
+}
+
 /// Represents the debug information for a derived type in LLVM IR.
 ///
 /// The types derived from other types usually add a level of indirection or an
@@ -157,7 +168,7 @@ pub(crate) struct DIDerivedType<'ctx> {
     _marker: PhantomData<&'ctx ()>,
 }
 
-impl DIDerivedType<'_> {
+impl<'ctx> DIDerivedType<'ctx> {
     /// Constructs a new [`DIDerivedType`] from the given `value`.
     ///
     /// # Safety
@@ -173,6 +184,19 @@ impl DIDerivedType<'_> {
             value_ref,
             _marker: PhantomData,
         }
+    }
+
+    /// Returns the base type of this derived type.
+    pub(crate) fn base_type(&self) -> Metadata<'ctx> {
+        unsafe {
+            let value = LLVMGetOperand(self.value_ref, DIDerivedTypeOperand::BaseType as u32);
+            Metadata::from_value_ref(value)
+        }
+    }
+
+    /// Returns the name of this derived type.
+    pub(crate) fn name(&self) -> Option<&'ctx [u8]> {
+        unsafe { di_type_name(self.metadata_ref) }
     }
 
     /// Replaces the name of the type with a new name.
@@ -221,7 +245,7 @@ pub(crate) struct DICompositeType<'ctx> {
     _marker: PhantomData<&'ctx ()>,
 }
 
-impl DICompositeType<'_> {
+impl<'ctx> DICompositeType<'ctx> {
     /// Constructs a new [`DICompositeType`] from the given `value`.
     ///
     /// # Safety
@@ -241,7 +265,7 @@ impl DICompositeType<'_> {
 
     /// Returns an iterator over elements (struct fields, enum variants, etc.)
     /// of the composite type.
-    pub(crate) fn elements(&self) -> impl Iterator<Item = Metadata<'_>> {
+    pub(crate) fn elements(&self) -> impl Iterator<Item = Metadata<'ctx>> + use<'ctx> {
         let elements =
             unsafe { LLVMGetOperand(self.value_ref, DICompositeTypeOperand::Elements as u32) };
         let operands = if elements.is_null() {
@@ -256,7 +280,7 @@ impl DICompositeType<'_> {
     }
 
     /// Returns the name of the composite type.
-    pub(crate) fn name(&self) -> Option<&[u8]> {
+    pub(crate) fn name(&self) -> Option<&'ctx [u8]> {
         unsafe { di_type_name(self.metadata_ref) }
     }
 
@@ -310,6 +334,10 @@ impl DICompositeType<'_> {
     /// Returns a DWARF tag of the given composite type.
     pub(crate) fn tag(&self) -> DwTag {
         unsafe { di_node_tag(self.metadata_ref) }
+    }
+
+    pub(crate) const fn value_ref(&self) -> LLVMValueRef {
+        self.value_ref
     }
 }
 
@@ -367,6 +395,29 @@ impl DISubprogram<'_> {
                 DISubprogramOperand::Ty as u32,
             ))
         }
+    }
+
+    /// Returns parameter type metadata, excluding the subroutine return type.
+    pub(crate) fn parameter_types(
+        &self,
+        context: LLVMContextRef,
+    ) -> impl Iterator<Item = Option<Metadata<'_>>> {
+        // A DISubroutineType stores the return type first and formal parameter
+        // types after it. The field relocation pass needs these source-level
+        // types because LLVM function parameters are opaque pointers.
+        let subroutine_type = unsafe { llvm_sys::core::LLVMMetadataAsValue(context, self.ty()) };
+        // The `types:` array is operand 5 in LLVM's DISubroutineType metadata.
+        let type_array = unsafe { LLVMGetOperand(subroutine_type, 5) };
+        let operands = if type_array.is_null() {
+            0
+        } else {
+            unsafe { LLVMGetNumOperands(type_array) }
+        };
+
+        (1..operands).map(move |i| {
+            let operand = unsafe { LLVMGetOperand(type_array, i.cast_unsigned()) };
+            (!operand.is_null()).then(|| unsafe { Metadata::from_value_ref(operand) })
+        })
     }
 
     pub(crate) fn file(&self) -> LLVMMetadataRef {

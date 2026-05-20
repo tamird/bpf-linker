@@ -1,4 +1,5 @@
 mod di;
+mod field_reloc;
 mod iter;
 mod types;
 
@@ -11,6 +12,7 @@ use std::{
 };
 
 pub(crate) use di::DISanitizer;
+pub(crate) use field_reloc::FieldRelocPass;
 use iter::{IterModuleFunctions as _, IterModuleGlobalAliases as _, IterModuleGlobals as _};
 use llvm_sys::{
     LLVMAttributeFunctionIndex, LLVMLinkage, LLVMVisibility,
