@@ -10,8 +10,7 @@ workflows:
         - 'oras-project/setup-oras@v2'
         - 'taiki-e/install-action@v2'
     '.github/workflows/nightly.yml':
-        - 'actions/checkout@v7'
-        - 'peter-evans/create-pull-request@v8'
+        - 'tamird/bpf-linker@codex/reusable-lock-callee'
 dependencies:
     'actions/checkout@v7':
         ref: 'v7'
@@ -33,13 +32,13 @@ dependencies:
         commit: 'sha1-005458ad77f1c8facd38a094e4af2e69e5607ff4'
         owner_id: 81890686
         repo_id: 590286646
-    'peter-evans/create-pull-request@v8':
-        ref: 'v8'
-        commit: 'sha1-5f6978faf089d4d20b00c7766989d076bb2fc7f1'
-        owner_id: 18365890
-        repo_id: 197176365
     'taiki-e/install-action@v2':
         ref: 'v2'
         commit: 'sha1-8cca0918f8471c33515202b73f56ab27f2bed283'
         owner_id: 43724913
         repo_id: 442947557
+    'tamird/bpf-linker@codex/reusable-lock-callee':
+        ref: 'codex/reusable-lock-callee'
+        commit: 'sha1-ed0ba6e0d76a42df263b345d922a8c7bc2f22be9'
+        owner_id: 1535036
+        repo_id: 715663310

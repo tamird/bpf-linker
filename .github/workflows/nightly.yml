@@ -1,94 +1,20 @@
-name: Update Rust toolchains
+name: Reusable workflow lockfile experiment
 
 on:
-  pull_request:
-    paths:
-      - .github/workflows/actions.lock
-      - .github/workflows/nightly.yml
-
-  push:
-    branches:
-      - main
-
-  schedule:
-    - cron: 00 3 * * *
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
-  resolve:
-    permissions:
-      contents: read
-    # Shared Rust channel discovery (aya-rs/aya#1688).
-    # gh-actions-lock v0.2.0 does not lock external reusable workflows.
-    uses: aya-rs/aya/.github/workflows/rust-toolchains.yml@2a07daa48ae467480d7a456710ecd6bc7b1dd6c8 # main
-    with:
-      channels: stable beta nightly
-
-  update:
-    needs: resolve
-    if: >-
-      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+  positive-control:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      pull-requests: write
-    # Keep one promotion running and only the newest promotion pending.
-    concurrency: nightly-promotion
-    # Only main can enter this environment and use its Crabby credential.
-    environment: nightly-promotion
     steps:
-      - uses: actions/checkout@v7
+      - id: control
+        uses: tamird/bpf-linker/.github/actions/lock-control@codex/reusable-lock-callee
+      - env:
+          MARKER: ${{ steps.control.outputs.marker }}
+        run: echo "COMPOSITE_OUTPUT=$MARKER"
 
-      - name: Update Rust toolchains and LLVM
-        id: update
-        env:
-          GH_TOKEN: ${{ github.token }}
-          RUST_TOOLCHAINS: ${{ needs.resolve.outputs.rust-toolchains }}
-        run: |
-          set -euo pipefail
-
-          candidate=$(python3 -B scripts/rustc-llvm.py update "$RUST_TOOLCHAINS")
-          if [[ -n "$candidate" ]]; then
-            bazel mod deps --lockfile_mode=update
-            toolchains=$(jq -c .toolchains <<< "$candidate")
-            commit=$(jq -r '.["llvm-commit"]' <<< "$candidate")
-            printf 'toolchains=%s\nllvm-commit=%s\n' \
-              "$toolchains" "$commit" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Create or update the Rust toolchain pull request
-        id: pull-request
-        if: steps.update.outputs.toolchains != ''
-        uses: peter-evans/create-pull-request@v8
-        with:
-          # GitHub requires approval before GITHUB_TOKEN-created PRs run CI.
-          # Crabby starts required checks automatically so updates auto-merge.
-          # Forks use GITHUB_TOKEN and approve their checks manually.
-          token: ${{ secrets.CRABBY_GITHUB_TOKEN || github.token }}
-          branch: create-pull-request/rust-nightly
-          add-paths: |
-            MODULE.bazel
-            MODULE.bazel.lock
-          commit-message: |-
-            Update Rust toolchains
-
-            Match ${{ fromJSON(steps.update.outputs.toolchains).nightly.rust }} to rustc LLVM commit
-            ${{ steps.update.outputs.llvm-commit }}.
-            Test Rust ${{ fromJSON(steps.update.outputs.toolchains).stable.rust }} with LLVM ${{ fromJSON(steps.update.outputs.toolchains).stable.llvm }}.
-            Test ${{ fromJSON(steps.update.outputs.toolchains).beta.rust }} with LLVM ${{ fromJSON(steps.update.outputs.toolchains).beta.llvm }}.
-          title: >-
-            Update Rust ${{ fromJSON(steps.update.outputs.toolchains).stable.rust }},
-            ${{ fromJSON(steps.update.outputs.toolchains).beta.rust }},
-            ${{ fromJSON(steps.update.outputs.toolchains).nightly.rust }}
-          body: |-
-            Update the pinned Rust toolchains and their LLVM selections.
-
-      - name: Enable auto-merge
-        # Forks do not receive the Crabby token required for auto-merge.
-        if: >-
-          !github.event.repository.fork &&
-          steps.pull-request.outputs.pull-request-number != ''
-        env:
-          GH_TOKEN: ${{ secrets.CRABBY_GITHUB_TOKEN }}
-          PULL_REQUEST: ${{ steps.pull-request.outputs.pull-request-number }}
-        run: gh pr merge "$PULL_REQUEST" --auto --rebase
+  reusable:
+    uses: tamird/bpf-linker/.github/workflows/lock-probe.yml@codex/reusable-lock-callee
