@@ -1,0 +1,10 @@
+name: Reusable workflow lockfile probe
+on:
+  workflow_call:
+permissions:
+  contents: read
+jobs:
+  marker:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo 'REUSABLE_MARKER=A'

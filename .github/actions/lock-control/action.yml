@@ -1,0 +1,14 @@
+name: Lockfile positive control
+description: Report the source revision selected by the action lockfile.
+outputs:
+  marker:
+    description: Source revision marker.
+    value: ${{ steps.marker.outputs.marker }}
+runs:
+  using: composite
+  steps:
+    - id: marker
+      shell: bash
+      run: |
+        echo 'COMPOSITE_MARKER=A'
+        echo 'marker=A' >> "$GITHUB_OUTPUT"
