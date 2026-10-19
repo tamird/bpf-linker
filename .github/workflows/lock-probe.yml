@@ -7,4 +7,4 @@ jobs:
   marker:
     runs-on: ubuntu-latest
     steps:
-      - run: echo 'REUSABLE_MARKER=A'
+      - run: echo 'REUSABLE_MARKER=B'

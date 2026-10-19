@@ -10,5 +10,5 @@ runs:
     - id: marker
       shell: bash
       run: |
-        echo 'COMPOSITE_MARKER=A'
-        echo 'marker=A' >> "$GITHUB_OUTPUT"
+        echo 'COMPOSITE_MARKER=B'
+        echo 'marker=B' >> "$GITHUB_OUTPUT"
